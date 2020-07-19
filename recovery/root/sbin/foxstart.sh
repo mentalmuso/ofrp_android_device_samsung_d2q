@@ -1,35 +1,41 @@
 #!/sbin/sh
 #
-# /sbin/foxstart.sh
-# Custom script for OrangeFox TWRP Recovery
-# Copyright (C) 2018-2020 OrangeFox Recovery Project
+# 	/sbin/foxstart.sh
+# 	Custom script for OrangeFox Recovery
 #
-# This software is licensed under the terms of the GNU General Public
-# License version 2, as published by the Free Software Foundation, and
-# may be copied, distributed, and modified under those terms.
+#	This file is part of the OrangeFox Recovery Project
+# 	Copyright (C) 2018-2020 The OrangeFox Recovery Project
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+#	OrangeFox is free software: you can redistribute it and/or modify
+#	it under the terms of the GNU General Public License as published by
+#	the Free Software Foundation, either version 3 of the License, or
+#	any later version.
 #
-# See <http://www.gnu.org/licenses/>.
+#	OrangeFox is distributed in the hope that it will be useful,
+#	but WITHOUT ANY WARRANTY; without even the implied warranty of
+#	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#	GNU General Public License for more details.
 #
-# Please maintain this if you use this script or any part of it
+# 	This software is released under GPL version 3 or any later version.
+#	See <http://www.gnu.org/licenses/>.
+#
+# 	Please maintain this if you use this script or any part of it
+#
 #
 # * Author: DarthJabba9
-# * Date:   06 January 2020
+# * Date:   20200531
 # * Identify some ROM features and hardware components
 # * Do some other sundry stuff
 #
 #
+SCRIPT_LASTMOD_DATE="20200531"
 C="/tmp_cust"
 LOG="/tmp/recovery.log"
-CFG="/tmp/orangefox.cfg"
+CFG="/etc/orangefox.cfg"
 FS="/etc/recovery.fstab"
 DEBUG="0"  	  # enable for more debug messages
 VERBOSE_DEBUG="0" # enable for really verbose debug messages
-SYS_ROOT="0"	  # device with system_root?
+SYS_ROOT="0"	  # do we have system_root?
 SAR="0"	  	  # SAR set up properly in recovery?
 ADJUST_VENDOR="0" # enable to remove /vendor from fstab if not needed
 ADJUST_CUST="0"   # enable to remove /cust from fstab if not needed
@@ -64,6 +70,12 @@ DebugDirList() {
 DebugMsg() {
    [ ! "$DEBUG" = "1" ] && return
    echo "DEBUG: OrangeFox: $@" >> $LOG
+}
+
+# is the directory mounted?
+is_mounted() {
+  grep -q " `readlink -f $1` " /proc/mounts 2>/dev/null
+  return $?
 }
 
 # is it a treble ROM ?
@@ -115,16 +127,17 @@ local C="/tmp_cust"
   echo "$T"
 }
 
-# does this device have system_root?
+# do we have system_root?
 has_system_root() {
   local F=$(getprop "ro.build.system_root_image" 2>/dev/null)
-  [ "$F" = "true" ] && echo "1" || echo "0"
+  local F2=$(getprop "ro.twrp.sar" 2>/dev/null)
+  [ "$F" = "true" -o "$F2" = "true" ] && echo "1" || echo "0"
 }
 
 # Is this set up properly as SAR?
-Is_Proper_SAR() {
-  local F=$(getprop "ro.build.system_root_image" 2>/dev/null)
-  [ "$F" != "true" ] && {
+is_SAR() {
+  local F=$(has_system_root)
+  [ "$F" != "1" ] && {
     echo "0"
     return  
   }
@@ -136,6 +149,7 @@ Is_Proper_SAR() {
   [ -n "$F" ] && echo "1" || echo "0"
 }
 
+# try to identify the installed ROM, and some ROM information
 get_ROM() {
 local S="/tmp_system_rom"
 local PROP="$S/build.prop"
@@ -160,19 +174,49 @@ local slot=$(getprop "ro.boot.slot_suffix")
    [ ! -e $PROP ] && {
       umount $S > /dev/null 2>&1
       rmdir $S
+      echo "DEBUG: OrangeFox: error - I cannot find the system build.prop" >> $LOG
       echo ""
       return
    }
 
    # query the build.prop
+   local mv1=0
+   local mv2=0
    local tmp2=""
    local tmp3=""
    tmp2=$(file_getprop "$PROP" "ro.build.display.id")
    [ -z "$tmp2" ] && tmp2=$(file_getprop "$PROP" "ro.build.id")
    [ -z "$tmp2" ] && tmp2=$(file_getprop "$PROP" "ro.system.build.id")
    
-   if [ -n "$tmp2" ]; then
+   # ROM not found?
+   if [ -z "$tmp2" ]; 
+   then
+      umount $S > /dev/null 2>&1
+      [ -d "$S" ] && rmdir $S > /dev/null 2>&1
+      echo "DEBUG: OrangeFox: I cannot find the ROM information in the system build.prop. Trying vendor ..." >> $LOG
+      PROP="/vendor/build.prop"
+      [ ! -d "/vendor" ] && mkdir -p /vendor > /dev/null 2>&1
+      if [ -d "/vendor" ]; then
+         !is_mounted /vendor && {
+            $MOUNT_CMD /vendor > /dev/null 2>&1
+            is_mounted /vendor && mv1=1
+         }
+   	 [ -e $PROP ] && tmp2=$(file_getprop "$PROP" "ro.vendor.build.id")
+      fi
+      [ ! -e $PROP -o -z "$tmp2" ] && {
+           [ "$mv1" = "1" ] && umount /vendor > /dev/null 2>&1
+      	   echo "DEBUG: OrangeFox: error - no joy with the vendor build.prop either" >> $LOG
+      	   echo ""
+      	   return
+      }
+  fi
+   
+   # we have a ROM - get SDK, etc
+   if [ -n "$tmp2" ]; 
+   then
       tmp3=$(file_getprop "$PROP" "ro.build.version.sdk")
+      [ -z "$tmp3" ] && tmp3=$(file_getprop "$PROP" "ro.system.build.version.sdk")
+      [ -z "$tmp3" ] && tmp3=$(file_getprop "$PROP" "ro.vendor.build.version.sdk")
       [ -n "$tmp3" ] && {
          ANDROID_SDK="$tmp3"
          $SETPROP orangefox.rom.sdk "$tmp3" > /dev/null 2>&1
@@ -180,12 +224,16 @@ local slot=$(getprop "ro.boot.slot_suffix")
          echo "ANDROID_SDK=$ANDROID_SDK" >> $CFG
       }
       
+      # get incremental version
       tmp3=$(file_getprop "$PROP" "ro.build.version.incremental")
+      [ -z "$tmp3" ] && tmp3=$(file_getprop "$PROP" "ro.system.build.version.incremental")
+      [ -z "$tmp3" ] && tmp3=$(file_getprop "$PROP" "ro.vendor.build.version.incremental")
       [ -n "$tmp3" ] && {
         echo "DEBUG: OrangeFox: INCREMENTAL_VERSION=$tmp3" >> $LOG
         echo "INCREMENTAL_VERSION=$tmp3" >> $CFG
       }
       
+      # and other stuff
       tmp3=$(file_getprop "$PROP" "ro.build.flavor")
       [ -n "$tmp3" ] && {
            echo "DEBUG: OrangeFox: BUILD_FLAVOR=$tmp3" >> $LOG
@@ -197,13 +245,18 @@ local slot=$(getprop "ro.boot.slot_suffix")
    if [ -n "$tmp2" ]; 
    then
       local FP=$(file_getprop "$PROP" "ro.build.fingerprint")
-      if [ -z "$FP" ]; then
+      [ -z "$FP" ] && FP=$(file_getprop "$PROP" "ro.system.build.fingerprint")
+      [ -z "$FP" ] && FP=$(file_getprop "$PROP" "ro.vendor.build.fingerprint")
+      if [ -z "$FP" ]; 
+      then
       	 PROP="/vendor/build.prop"
       	 [ ! -d "/vendor" ] && mkdir -p /vendor > /dev/null 2>&1
       	 [ -d "/vendor" ] && {
-            $MOUNT_CMD /vendor > /dev/null 2>&1
+            !is_mounted /vendor && {
+               $MOUNT_CMD /vendor > /dev/null 2>&1
+               is_mounted /vendor && mv2=1
+            }
             FP=$(file_getprop "$PROP" "ro.vendor.build.fingerprint")
-            umount /vendor > /dev/null 2>&1
       	 }     
       fi
       
@@ -216,8 +269,9 @@ local slot=$(getprop "ro.boot.slot_suffix")
    fi # check for ROM fingerprints
    
    # unmount
-   umount $S > /dev/null 2>&1
-   rmdir $S
+   is_mounted $S && umount $S > /dev/null 2>&1
+   [ -d "$S" ] && rmdir $S > /dev/null 2>&1
+   [ "$mv1" = "1" -o "$mv2" = "1"  ] && umount /vendor > /dev/null 2>&1
    
    # return
    echo "$tmp2"
@@ -351,6 +405,7 @@ MIUI_Action() {
    fi
   echo $D >> $LOG
   echo "MIUI=$M" >> $CFG
+  $SETPROP orangefox.miui.rom "$M" > /dev/null 2>&1
 }
 
 # backup (or restore) fstab
@@ -362,29 +417,11 @@ backup_restore_FS() {
    fi
 }
 
-# set up Leds for charging 
-charging_Leds() {
-  echo battery-charging > /sys/class/leds/blue/trigger
-  echo battery-full > /sys/class/leds/green/trigger
-}
-
 # fix yellow flashlight on mido/vince/kenzo and configure Leds on others
 flashlight_Leds_config() {
-local LED=""
    case "$FOX_DEVICE" in
-       kenzo | kate)
-       		LED="/sys/devices/soc.0/qpnp-flash-led-23";
-       		charging_Leds;
-       	;;
-       	mido)
-       		LED="/sys/devices/soc/qpnp-flash-led-25";
-       		echo 0 > /proc/touchpanel/capacitive_keys_disable;
-       		charging_Leds;
-       		echo bkl-trigger > /sys/class/leds/button-backlight/trigger;
-            	echo 5 > /sys/class/leds/button-backlight/brightness; # Enable keys by default.
-       	;;
        vince)
-       		LED="/sys/devices/soc/qpnp-flash-led-24";
+   		echo "0" > /sys/devices/soc/qpnp-flash-led-24/leds/led:torch_1/max_brightness;
        	;;
        riva)
             	echo 1 > /sys/class/leds/flashlight/max_brightness;
@@ -395,7 +432,6 @@ local LED=""
        	;;
    esac
 
-   echo "0" > /$LED/leds/led:torch_1/max_brightness
    echo "0" > /sys/class/leds/led:torch_1/max_brightness
    echo "0" > /sys/class/leds/torch-light1/max_brightness
    echo "0" > /sys/class/leds/led:flash_1/max_brightness
@@ -412,7 +448,7 @@ local OPS=$(getprop "orangefox.postinit.status")
    [ -z "$D" ] && D=$(getprop "ro.build.date")
    OPS=$(uname -r)
    SYS_ROOT=$(has_system_root)
-   [ "$SYS_ROOT" = "1" ] && SAR=$(Is_Proper_SAR)
+   [ "$SYS_ROOT" = "1" ] && SAR=$(is_SAR)
    echo "KERNEL=$OPS" >> $CFG
    echo "SYSTEM_ROOT=$SYS_ROOT" >> $CFG
    echo "PROPER_SAR=$SAR" >> $CFG
@@ -422,7 +458,11 @@ local OPS=$(getprop "orangefox.postinit.status")
    echo "DEBUG: OrangeFox: FOX_KERNEL=$OPS" >> $LOG
    echo "DEBUG: OrangeFox: SYSTEM_ROOT=$SYS_ROOT" >> $LOG
    echo "DEBUG: OrangeFox: PROPER_SAR=$SAR" >> $LOG
+   echo "DEBUG: OrangeFox: FOX_SCRIPT_DATE=$SCRIPT_LASTMOD_DATE" >> $LOG
    $SETPROP orangefox.postinit.status 1
+   
+   # if someone is still using old recovery sources
+   ln -s $CFG /tmp/orangefox.cfg
 }
 
 # cater for situations where setprop is a dead symlinked applet
@@ -469,10 +509,28 @@ local KLOG="/tmp/dmesg.log"
    fi
 }
 
+# whether there is file-based encryption
+isFB_Encrypted() {
+  [ -e "/data/unencrypted/key/version" ] && echo "1" || echo "0"
+}
+
+# whether there is full-disk encryption
+isFD_Encrypted() {
+  local F=$(mount | grep "dm-")
+  [ -n "$F" ] && echo "1" || echo "0"
+}
+
 # post-init stuff
 post_init() {
   local M="/FFiles/magiskboot_new"
   [ -f $M ] && chmod 0755 $M
+
+  # FBE - remove the "del_pass" addon, but keep a copy in /FFiles/Tools/
+  M=$(isFB_Encrypted)
+  [ "$M" = "1" ] && {
+    cp -a /FFiles/OF_DelPass/OF_DelPass.zip /FFiles/Tools/
+    rm -rf "/FFiles/OF_DelPass/"
+  }
 }
 
 ### main() ###
@@ -502,5 +560,6 @@ post_init
 # Leds
 flashlight_Leds_config
 
+#
 exit 0
 ### end main ###
